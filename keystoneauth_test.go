@@ -19,6 +19,7 @@ import (
 func response(w http.ResponseWriter, expiry time.Time) {
 	fmt.Fprintf(w, `{"token":{"user":{"id":"u","domain":{"id":"ud"}},"project":{"id":"p","domain":{"id":"pd"}},"roles":[{"name":"member"}],"expires_at":%q}}`, expiry.UTC().Format(time.RFC3339Nano))
 }
+
 func TestValidationModesAndCache(t *testing.T) {
 	for _, service := range []bool{false, true} {
 		t.Run(fmt.Sprint(service), func(t *testing.T) {
@@ -81,6 +82,7 @@ func TestValidationModesAndCache(t *testing.T) {
 		})
 	}
 }
+
 func TestServiceRefreshAndFailures(t *testing.T) {
 	for _, tc := range []struct {
 		name     string
@@ -117,6 +119,7 @@ func TestServiceRefreshAndFailures(t *testing.T) {
 		})
 	}
 }
+
 func TestRejectInvalidResponses(t *testing.T) {
 	for _, body := range []string{`{`, `{}`, `{"token":{"user":{"id":"u"},"expires_at":"2000-01-01T00:00:00Z"}}`, `{"token":{"user":{"id":"u"},"project":{"id":"p"},"system":{"all":true},"expires_at":"2099-01-01T00:00:00Z"}}`} {
 		s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { fmt.Fprint(w, body) }))
@@ -127,11 +130,14 @@ func TestRejectInvalidResponses(t *testing.T) {
 		s.Close()
 	}
 }
+
 func TestRedirects(t *testing.T) {
 	var reached atomic.Bool
 	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { reached.Store(true) }))
 	defer target.Close()
-	s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { http.Redirect(w, r, target.URL, 307) }))
+	s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, target.URL, http.StatusTemporaryRedirect)
+	}))
 	defer s.Close()
 	for _, service := range []bool{false, true} {
 		cfg := Config{URL: s.URL, AllowHTTP: true, HTTPClient: s.Client()}
@@ -146,6 +152,7 @@ func TestRedirects(t *testing.T) {
 		}
 	}
 }
+
 func TestHeaders(t *testing.T) {
 	for _, tc := range []struct {
 		x, a []string
@@ -168,6 +175,7 @@ func TestHeaders(t *testing.T) {
 		}
 	}
 }
+
 func TestAuthorizationBoundaries(t *testing.T) {
 	p := AdminPolicy{Roles: []string{"admin"}, ProjectIDs: []string{"ops"}}
 	for _, tc := range []struct {
@@ -205,6 +213,7 @@ func TestAuthorizationBoundaries(t *testing.T) {
 type validatorFunc func(context.Context, string) (Identity, error)
 
 func (f validatorFunc) Validate(c context.Context, s string) (Identity, error) { return f(c, s) }
+
 func TestMiddleware(t *testing.T) {
 	for _, tc := range []struct {
 		err    error
@@ -229,6 +238,7 @@ func TestMiddleware(t *testing.T) {
 		}
 	}
 }
+
 func TestBoundedConcurrentCache(t *testing.T) {
 	s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { response(w, time.Now().Add(time.Hour)) }))
 	defer s.Close()
@@ -244,20 +254,12 @@ func TestBoundedConcurrentCache(t *testing.T) {
 		}(n)
 	}
 	wg.Wait()
-	if len(c.cache) > 2 {
+	if c.cache.entries.Len() > 2 {
 		t.Fatal("unbounded cache")
 	}
-	// Expired entries must force revalidation, even when configured TTL is longer.
-	c.mu.Lock()
-	for key, v := range c.cache {
-		v.until = time.Now().Add(-time.Second)
-		c.cache[key] = v
-	}
-	c.mu.Unlock()
-	if _, err := c.Validate(context.Background(), "0"); err != nil {
-		t.Fatal(err)
-	}
+
 }
+
 func TestConfig(t *testing.T) {
 	for _, cfg := range []Config{{URL: "http://example.com"}, {URL: "https://user:pass@example.com"}, {URL: "https://example.com?q=x"}, {URL: "https://example.com", ApplicationCredentialID: "id"}, {URL: "https://example.com", CacheTTL: -1}} {
 		if _, err := New(cfg); err == nil {

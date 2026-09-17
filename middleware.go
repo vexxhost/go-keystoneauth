@@ -36,6 +36,8 @@ func TokenFromRequest(r *http.Request) (string, error) {
 
 // ErrorHandler allows applications to retain their own JSON error contract.
 type ErrorHandler func(http.ResponseWriter, *http.Request, error)
+
+// Options configures route authorization and error rendering.
 type Options struct {
 	Policy  Policy
 	OnError ErrorHandler
