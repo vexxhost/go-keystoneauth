@@ -4,12 +4,8 @@
 package keystoneauth
 
 import (
-	"bytes"
 	"context"
-	"crypto/sha256"
-	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
 	"net/url"
 	"strings"
@@ -17,6 +13,7 @@ import (
 	"time"
 )
 
+// Config configures a Client. Custom HTTP clients and transports must be safe for concurrent use.
 type Config struct {
 	// URL accepts an identity base URL or its /v3 endpoint.
 	URL       string
@@ -30,44 +27,19 @@ type Config struct {
 	// MaxCacheEntries defaults to 10000 when caching is enabled.
 	MaxCacheEntries int
 }
-type entry struct {
-	identity Identity
-	until    time.Time
-}
+
+// Client validates Keystone tokens and is safe for concurrent use. Construct it with New.
+// Configuration is fixed for its lifetime; do not copy a Client after first use.
 type Client struct {
-	cfg            Config
-	http           *http.Client
-	serviceMu      sync.Mutex
-	service        string
-	serviceExpires time.Time
-	mu             sync.Mutex
-	cache          map[[32]byte]entry
-}
-type token struct {
-	User struct {
-		ID     string `json:"id"`
-		Domain struct {
-			ID string `json:"id"`
-		} `json:"domain"`
-	} `json:"user"`
-	Project *struct {
-		ID     string `json:"id"`
-		Domain struct {
-			ID string `json:"id"`
-		} `json:"domain"`
-	} `json:"project"`
-	Domain *struct {
-		ID string `json:"id"`
-	} `json:"domain"`
-	System *struct {
-		All bool `json:"all"`
-	} `json:"system"`
-	Roles []struct {
-		Name string `json:"name"`
-	} `json:"roles"`
-	ExpiresAt time.Time `json:"expires_at"`
+	cfg       Config
+	http      *http.Client
+	cache     *identityCache
+	serviceMu sync.Mutex
+	service   *serviceCredential
+	refresh   *serviceRefresh
 }
 
+// New constructs a client without contacting Keystone.
 func New(cfg Config) (*Client, error) {
 	u, err := url.Parse(cfg.URL)
 	if err != nil || u.Host == "" || u.User != nil || u.RawQuery != "" || u.ForceQuery || u.Fragment != "" {
@@ -78,6 +50,9 @@ func New(cfg Config) (*Client, error) {
 	}
 	if (cfg.ApplicationCredentialID == "") != (cfg.ApplicationCredentialSecret == "") {
 		return nil, fmt.Errorf("keystoneauth: both application credential fields required")
+	}
+	if cfg.HTTPClient != nil && cfg.HTTPClient.Timeout < 0 {
+		return nil, fmt.Errorf("keystoneauth: negative HTTP timeout")
 	}
 	if cfg.CacheTTL < 0 || cfg.MaxCacheEntries < 0 {
 		return nil, fmt.Errorf("keystoneauth: negative cache setting")
@@ -97,8 +72,9 @@ func New(cfg Config) (*Client, error) {
 		}
 	}
 	h.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
-	return &Client{cfg: cfg, http: &h, cache: make(map[[32]byte]entry)}, nil
+	return &Client{cfg: cfg, http: &h, cache: newIdentityCache(cfg.CacheTTL, cfg.MaxCacheEntries)}, nil
 }
+
 func validToken(s string) bool {
 	if s == "" || len(s) > 16384 {
 		return false
@@ -110,165 +86,69 @@ func validToken(s string) bool {
 	}
 	return true
 }
-func decodeToken(r io.Reader) (token, error) {
-	var body struct {
-		Token token `json:"token"`
-	}
-	data, err := io.ReadAll(io.LimitReader(r, (1<<20)+1))
-	if err != nil || len(data) > 1<<20 {
-		return token{}, ErrUnavailable
-	}
-	if json.Unmarshal(data, &body) != nil {
-		return token{}, ErrUnavailable
-	}
-	return body.Token, nil
-}
-func (c *Client) serviceToken(ctx context.Context) (string, error) {
-	c.serviceMu.Lock()
-	defer c.serviceMu.Unlock()
-	if c.service != "" && time.Now().Add(time.Minute).Before(c.serviceExpires) {
-		return c.service, nil
-	}
-	payload := map[string]any{"auth": map[string]any{"identity": map[string]any{"methods": []string{"application_credential"}, "application_credential": map[string]string{"id": c.cfg.ApplicationCredentialID, "secret": c.cfg.ApplicationCredentialSecret}}}}
-	data, _ := json.Marshal(payload)
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.cfg.URL+"/auth/tokens", bytes.NewReader(data))
-	if err != nil {
-		return "", ErrUnavailable
-	}
-	req.Header.Set("Content-Type", "application/json")
-	res, err := c.http.Do(req)
-	if err != nil {
-		return "", ErrUnavailable
-	}
-	defer res.Body.Close()
-	if res.StatusCode != 201 {
-		return "", ErrUnavailable
-	}
-	t, err := decodeToken(res.Body)
-	value := res.Header.Get("X-Subject-Token")
-	if err != nil || !validToken(value) || !t.ExpiresAt.After(time.Now().Add(time.Minute)) {
-		return "", ErrUnavailable
-	}
-	c.service = value
-	c.serviceExpires = t.ExpiresAt
-	return value, nil
-}
 
 // Validate authenticates a token; scope and role authorization are separate.
 func (c *Client) Validate(ctx context.Context, subject string) (Identity, error) {
-	if !validToken(subject) {
-		return Identity{}, ErrUnauthorized
-	}
 	if err := ctx.Err(); err != nil {
 		return Identity{}, err
 	}
-	key := sha256.Sum256([]byte(subject))
-	now := time.Now()
-	c.mu.Lock()
-	cached, ok := c.cache[key]
-	c.mu.Unlock()
-	if ok && now.Before(cached.until) {
-		return cached.identity.clone(), nil
+	if !validToken(subject) {
+		return Identity{}, ErrUnauthorized
 	}
+	if i, ok := c.cache.get(subject, time.Now()); ok {
+		return i, nil
+	}
+	// Start the TTL before validation so a slow response cannot extend freshness.
+	started := time.Now()
+	t, err := c.validateToken(ctx, subject)
+	if err != nil {
+		return Identity{}, err
+	}
+	i, err := t.identity(time.Now())
+	if err != nil {
+		return Identity{}, err
+	}
+	c.cache.put(subject, i, started)
+	return i, nil
+}
+
+func (c *Client) validateToken(ctx context.Context, subject string) (token, error) {
 	serviceMode := c.cfg.ApplicationCredentialID != ""
 	for attempt := 0; attempt < 2; attempt++ {
 		auth := subject
+		var credential *serviceCredential
 		if serviceMode {
 			var err error
-			auth, err = c.serviceToken(ctx)
+			credential, err = c.serviceToken(ctx)
 			if err != nil {
-				return Identity{}, err
+				return token{}, err
 			}
+			auth = credential.value
 		}
-		req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.cfg.URL+"/auth/tokens", nil)
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.cfg.URL+"/auth/tokens?nocatalog", nil)
 		if err != nil {
-			return Identity{}, ErrUnavailable
+			return token{}, backendError("validate", "request", 0)
 		}
 		req.Header.Set("X-Auth-Token", auth)
 		req.Header.Set("X-Subject-Token", subject)
-		res, err := c.http.Do(req)
+		t, _, status, err := c.requestToken(req, http.StatusOK, "validate")
 		if err != nil {
-			return Identity{}, ErrUnavailable
+			return token{}, err
 		}
-		if res.StatusCode != 200 {
-			res.Body.Close()
-			if res.StatusCode == 401 && serviceMode {
-				c.serviceMu.Lock()
-				if c.service == auth {
-					c.service = ""
-				}
-				c.serviceMu.Unlock()
-				if attempt == 0 {
-					continue
-				}
-				return Identity{}, ErrUnavailable
+		if status == http.StatusOK {
+			return t, nil
+		}
+		if status == http.StatusUnauthorized && serviceMode {
+			c.invalidateService(credential)
+			if attempt == 0 {
+				continue
 			}
-			if res.StatusCode == 404 || res.StatusCode == 401 {
-				return Identity{}, ErrUnauthorized
-			}
-			return Identity{}, ErrUnavailable
+			return token{}, backendError("validate", "status", status)
 		}
-		t, err := decodeToken(res.Body)
-		res.Body.Close()
-		if err != nil {
-			return Identity{}, err
+		if status == http.StatusNotFound || status == http.StatusUnauthorized {
+			return token{}, ErrUnauthorized
 		}
-		if t.User.ID == "" || !t.ExpiresAt.After(time.Now()) {
-			return Identity{}, ErrUnauthorized
-		}
-		i := Identity{UserID: t.User.ID, UserDomainID: t.User.Domain.ID, ExpiresAt: t.ExpiresAt}
-		scopes := 0
-		if t.Project != nil {
-			if t.Project.ID == "" {
-				return Identity{}, ErrUnauthorized
-			}
-			scopes++
-			i.ProjectID = t.Project.ID
-			i.DomainID = t.Project.Domain.ID
-		}
-		if t.Domain != nil {
-			if t.Domain.ID == "" {
-				return Identity{}, ErrUnauthorized
-			}
-			scopes++
-			i.DomainID = t.Domain.ID
-		}
-		if t.System != nil {
-			if !t.System.All {
-				return Identity{}, ErrUnauthorized
-			}
-			scopes++
-			i.SystemScope = "all"
-		}
-		if scopes > 1 {
-			return Identity{}, ErrUnauthorized
-		}
-		for _, r := range t.Roles {
-			i.Roles = append(i.Roles, r.Name)
-		}
-		if c.cfg.CacheTTL > 0 {
-			until := now.Add(c.cfg.CacheTTL)
-			if i.ExpiresAt.Before(until) {
-				until = i.ExpiresAt
-			}
-			c.mu.Lock()
-			if len(c.cache) >= c.cfg.MaxCacheEntries {
-				for k, v := range c.cache {
-					if !time.Now().Before(v.until) {
-						delete(c.cache, k)
-					}
-				}
-				if len(c.cache) >= c.cfg.MaxCacheEntries {
-					for k := range c.cache {
-						delete(c.cache, k)
-						break
-					}
-				}
-			}
-			c.cache[key] = entry{i.clone(), until}
-			c.mu.Unlock()
-		}
-		return i, nil
+		return token{}, backendError("validate", "status", status)
 	}
-	return Identity{}, ErrUnavailable
+	return token{}, ErrUnavailable
 }

@@ -5,12 +5,26 @@ permissions:
 jobs:
   test:
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        go: ['1.25.x', 'stable']
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
-          go-version-file: go.mod
-          cache: false
+          go-version: ${{ matrix.go }}
       - run: test -z "$(gofmt -l .)"
       - run: go test -race -cover ./...
       - run: go vet ./...
+      - run: go test -run '^$' -fuzz FuzzTokenFromRequest -fuzztime 10s
+      - run: go test -run '^$' -fuzz FuzzDecodeToken -fuzztime 10s
+  analyze:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: stable
+      - run: go run honnef.co/go/tools/cmd/staticcheck@v0.8.1 ./...
+      - run: go run golang.org/x/vuln/cmd/govulncheck@v1.8.0 ./...
