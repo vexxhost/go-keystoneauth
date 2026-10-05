@@ -2,4 +2,7 @@ module github.com/vexxhost/go-keystoneauth
 
 go 1.25.0
 
-require github.com/hashicorp/golang-lru/v2 v2.0.7
+require (
+	github.com/danielgtaylor/huma/v2 v2.39.1
+	github.com/hashicorp/golang-lru/v2 v2.0.7
+)

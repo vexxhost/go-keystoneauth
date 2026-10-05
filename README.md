@@ -1,8 +1,9 @@
 # go-keystoneauth
 
-Lean Keystone v3 authentication for Go HTTP services. The only runtime dependency is a
-bounded, concurrency-safe LRU cache. Works with `net/http`, chi, and any router that
-accepts standard HTTP middleware.
+Lean Keystone v3 authentication for Go HTTP services. The only runtime dependency of
+the main package is a bounded, concurrency-safe LRU cache. Works with `net/http`, chi,
+and any router that accepts standard HTTP middleware; the optional `humaauth`
+subpackage provides the same for [Huma](https://huma.rocks) operations.
 
 ## Install
 
@@ -69,6 +70,58 @@ configured operator project. There are no implicit admin role names or projects.
 `AdminPolicy.Scope(identity, requestedProjectIDs)` prevents tenant queries from
 expanding beyond their own project. Nil means all authorized projects; an explicit empty
 slice stays empty. Authentication alone does not enforce resource ownership.
+
+`NewAuthenticator(validator, policy)` combines validation with `policy.Authorize` and
+returns a `Principal`: the verified `Identity` plus `Admin`, the policy's administrator
+decision. `Principal.Scope(requested)` applies the same rule as `AdminPolicy.Scope`
+without needing the policy again.
+
+## Configuration files
+
+`FileConfig` is the `keystone` section services read from YAML (or JSON). It names the
+environment variables that hold the application credential, so the file itself can be a
+ConfigMap:
+
+```yaml
+keystone:
+  url: https://keystone.example.com/v3
+  application_credential_id_env: MY_SERVICE_APPLICATION_CREDENTIAL_ID
+  application_credential_secret_env: MY_SERVICE_APPLICATION_CREDENTIAL_SECRET
+  admin_roles: [admin]
+  admin_project_ids: []
+  allow_http: false
+```
+
+```go
+client, err := keystoneauth.New(cfg.Keystone.Config(os.Getenv))
+if err != nil { return err }
+auth := keystoneauth.NewAuthenticator(client, cfg.Keystone.AdminPolicy())
+```
+
+`FileConfig` applies no defaults: an empty `admin_roles` means nobody is an
+administrator. Services set their own defaults and required fields before use.
+
+## Huma
+
+`humaauth.Middleware` authenticates Huma operations with an `Authenticator`:
+
+```go
+api := humago.New(mux, huma.DefaultConfig("My API", version))
+api.UseMiddleware(humaauth.Middleware(api, auth, humaauth.Options{Timeout: 30 * time.Second}))
+
+huma.Register(api, op, func(ctx context.Context, in *Input) (*Output, error) {
+    principal, _ := humaauth.PrincipalFrom(ctx)
+    projects, err := principal.Scope(in.Body.ProjectIDs)
+    ...
+})
+```
+
+Operations without an `OperationID` (Huma's own schema and docs routes) and operations
+declaring an explicitly empty `Security` need no token. Failures are written as Huma
+problem responses: 401 with `WWW-Authenticate: Bearer`, 403, 504 when `Timeout` passed,
+and 503 otherwise. Messages never include the cause. Set `Options.OnError` to log with
+your own request ID and then call `humaauth.WriteError`. `Timeout`, when set, bounds
+validation and the operation together.
 
 ## Errors, transport, and caching
 
