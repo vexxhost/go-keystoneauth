@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## v0.2.0 (2026-10-05)
 
 - Add `FileConfig`, the shared `keystone` configuration-file section, with `Config(getenv)` and `AdminPolicy()`. It applies no defaults.
 - Add `Principal`, `Authenticator` and `NewAuthenticator`, which combine validation, `AdminPolicy.Authorize` and the administrator decision. `Principal.Scope` shares its rule with `AdminPolicy.Scope`.
@@ -16,3 +16,7 @@
 - Test minimum-series and stable Go in CI and run pinned Staticcheck and vulnerability checks.
 
 Compatibility: use `errors.Is` for sentinel errors; backend failures may now carry a sanitized `BackendError`. Caching eviction changes from arbitrary to LRU. Validation rejects unsupported restrictions instead of ignoring them. The package now has one small runtime dependency.
+
+## v0.1.0 (2026-09-17)
+
+Initial release.

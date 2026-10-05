@@ -8,7 +8,7 @@ subpackage provides the same for [Huma](https://huma.rocks) operations.
 ## Install
 
 ```sh
-go get github.com/vexxhost/go-keystoneauth@v0.1.0
+go get github.com/vexxhost/go-keystoneauth@v0.2.0
 ```
 
 Go 1.25 or newer is required.
