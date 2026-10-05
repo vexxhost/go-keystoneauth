@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Add `FileConfig`, the shared `keystone` configuration-file section, with `Config(getenv)` and `AdminPolicy()`. It applies no defaults.
+- Add `Principal`, `Authenticator` and `NewAuthenticator`, which combine validation, `AdminPolicy.Authorize` and the administrator decision. `Principal.Scope` shares its rule with `AdminPolicy.Scope`.
+- Add the `humaauth` subpackage: Huma middleware, problem-format error responses, and `PrincipalFrom`/`NewContext`. Only programs importing it depend on Huma.
 - Replace cache-wide scans with a bounded LRU (`hashicorp/golang-lru/v2`), retaining opt-in caching, hashed token keys, expiry limits, and independent identity copies.
 - Share service-token refresh results without holding a mutex during network I/O. Canceled waiters return promptly; shared refresh has its own bounded lifetime. Old 401 responses cannot invalidate a newer token generation.
 - Preserve cancellation and deadline errors; expose sanitized `BackendError` classification through `errors.As` while retaining `ErrUnavailable` matching and generic HTTP responses.

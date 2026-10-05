@@ -108,15 +108,19 @@ func (p AdminPolicy) Authorize(i Identity) error {
 
 // Scope preserves nil (all authorized projects) versus an explicit empty filter.
 func (p AdminPolicy) Scope(i Identity, requested []string) ([]string, error) {
-	if p.IsAdmin(i) {
+	return scope(p.IsAdmin(i), i.ProjectID, requested)
+}
+
+func scope(admin bool, projectID string, requested []string) ([]string, error) {
+	if admin {
 		return requested, nil
 	}
-	if i.ProjectID == "" {
+	if projectID == "" {
 		return nil, ErrForbidden
 	}
 	if requested != nil {
 		for _, id := range requested {
-			if id != i.ProjectID {
+			if id != projectID {
 				return nil, ErrForbidden
 			}
 		}
@@ -124,7 +128,7 @@ func (p AdminPolicy) Scope(i Identity, requested []string) ([]string, error) {
 			return []string{}, nil
 		}
 	}
-	return []string{i.ProjectID}, nil
+	return []string{projectID}, nil
 }
 
 // RequireAdmin permits only configured administrators, suitable for admin-only routes.
